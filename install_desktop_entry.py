@@ -12,10 +12,19 @@ ICON_PATH = BASE_DIR / 'assets' / '1pass-view.png'
 DESKTOP_PATH = Path.home() / '.local' / 'share' / 'applications' / '1pass-view.desktop'
 
 
+def resolve_python_executable() -> Path:
+    # Prefer project-local virtualenv so desktop launch uses installed app dependencies.
+    venv_python = BASE_DIR / '.venv' / 'bin' / 'python'
+    if venv_python.exists() and os.access(venv_python, os.X_OK):
+        return venv_python
+    return Path(sys.executable)
+
+
 def main() -> int:
     DESKTOP_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    exec_path = f'{sys.executable} "{BASE_DIR / "agileview_gui.py"}"'
+    python_executable = resolve_python_executable()
+    exec_path = f'{python_executable} "{BASE_DIR / "agileview_gui.py"}"'
     icon_path = ICON_PATH if ICON_PATH.exists() else BASE_DIR / 'assets' / '1pass-view-256.png'
 
     desktop = f"""[Desktop Entry]
@@ -36,6 +45,7 @@ Keywords=1Password;Agile Keychain;Vault;Passwords;
     DESKTOP_PATH.chmod(current_mode | stat.S_IXUSR)
 
     print(f'Desktop entry installed: {DESKTOP_PATH}')
+    print(f'Using Python executable: {python_executable}')
     return 0
 
 

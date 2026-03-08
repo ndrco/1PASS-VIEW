@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,13 +60,7 @@ class AgileKeychainBackend:
         self._items: list[VaultItem] = []
 
     def unlock(self, master_password: str) -> None:
-        try:
-            from onepassword.keychain import AKeychain
-        except Exception as exc:  # pragma: no cover - depends on user env
-            raise BackendUnavailableError(
-                'Не удалось импортировать onepasswordpy. Установи зависимость: '
-                'pip install git+https://github.com/Roguelazer/onepasswordpy.git'
-            ) from exc
+        AKeychain = _import_akeychain()
 
         keychain = AKeychain(self.bundle_path)
         keychain.unlock(master_password)
@@ -92,6 +87,34 @@ class AgileKeychainBackend:
         if not isinstance(data, dict):
             raise AgileViewError(f'Неожиданный формат данных у элемента {item.title!r}')
         return data
+
+
+def _bootstrap_local_venv_site_packages() -> None:
+    base_dir = Path(__file__).resolve().parent
+    lib_dir = base_dir / '.venv' / 'lib'
+    if not lib_dir.exists():
+        return
+    for site_packages_dir in sorted(lib_dir.glob('python*/site-packages')):
+        if site_packages_dir.is_dir():
+            site_packages = str(site_packages_dir)
+            if site_packages not in sys.path:
+                sys.path.insert(0, site_packages)
+
+
+def _import_akeychain():
+    try:
+        from onepassword.keychain import AKeychain
+        return AKeychain
+    except Exception:
+        _bootstrap_local_venv_site_packages()
+        try:
+            from onepassword.keychain import AKeychain
+            return AKeychain
+        except Exception as exc:  # pragma: no cover - depends on user env
+            raise BackendUnavailableError(
+                'Не удалось импортировать onepasswordpy. Установи зависимость: '
+                'pip install git+https://github.com/Roguelazer/onepasswordpy.git'
+            ) from exc
 
 
 class VaultReader:

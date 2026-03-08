@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import unittest
 
-from adapter import flatten_common_fields, sanitize_payload
+from adapter import AgileKeychainBackend, VaultItem, flatten_common_fields, sanitize_payload
 
 
 class SanitizePayloadTests(unittest.TestCase):
@@ -34,6 +35,13 @@ class SanitizePayloadTests(unittest.TestCase):
         compact = flatten_common_fields(payload)
 
         self.assertEqual(compact.get('password'), 'abc123')
+
+    def test_backend_exposes_items_property_and_decrypt_item(self) -> None:
+        backend = AgileKeychainBackend('/tmp/fake.agilekeychain')
+        backend._items = [VaultItem(uuid='1', title='Entry', raw_item=SimpleNamespace(decrypt=lambda: {'ok': True}))]
+
+        self.assertEqual(len(backend.items), 1)
+        self.assertEqual(backend.decrypt_item(backend.items[0]), {'ok': True})
 
 
 if __name__ == '__main__':
