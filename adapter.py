@@ -50,9 +50,23 @@ CATEGORY_LABELS: dict[str, str] = {
     'wallet.outdoorlicense': 'Лицензии',
 }
 
+NON_EMPTY_VALUE = object()
+_MISSING = object()
+CUSTOM_CATEGORY_RULES: list[tuple[str, str, str, Any]] = [
+    ('legacy.license', 'Лицензии', 'sections[1].title', 'Покупатель'),
+    ('legacy.email_account', 'Учетные записи почты', 'sections[1].title', 'SMTP'),
+    ('legacy.credit_card', 'Кредитные карты', 'cardholder', 'Контактная информация'),
+    ('legacy.credit_card', 'Кредитные карты', 'sections[1].title', 'Контактная информация'),
+    ('legacy.server', 'Серверы', 'sections[1].title', 'Консоль администрирования'),
+    ('legacy.ssn', 'Номера социального страхования', 'sections[0].fields[1].a.generate', 'off'),
+    ('legacy.router', 'Беспроводные маршрутизаторы', 'sections[0].fields[4].n', 'network_name'),
+    ('legacy.driver_license', 'Водительские права', 'fullname', NON_EMPTY_VALUE),
+    ('legacy.secure_note', 'Защищенные заметки', 'notesPlain', NON_EMPTY_VALUE),
+]
+
 
 class AgileKeychainBackend:
-    """Thin adapter around onepasswordpy's AKeychain API."""
+    """Thin adapter around onepasswordpy keychain APIs."""
 
     def __init__(self, bundle_path: str | os.PathLike[str]):
         self.bundle_path = str(bundle_path)
@@ -60,10 +74,23 @@ class AgileKeychainBackend:
         self._items: list[VaultItem] = []
 
     def unlock(self, master_password: str) -> None:
-        AKeychain = _import_akeychain()
+        AKeychain, CKeychain = _import_keychain_classes()
+        keychain = None
+        first_error: Exception | None = None
 
-        keychain = AKeychain(self.bundle_path)
-        keychain.unlock(master_password)
+        for keychain_class in _keychain_candidates(self.bundle_path, AKeychain, CKeychain):
+            try:
+                candidate = keychain_class(self.bundle_path)
+                candidate.unlock(master_password)
+                keychain = candidate
+                break
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+
+        if keychain is None:
+            assert first_error is not None
+            raise first_error
 
         items: list[VaultItem] = []
         for item in getattr(keychain, 'items', []):
@@ -101,15 +128,76 @@ def _bootstrap_local_venv_site_packages() -> None:
                 sys.path.insert(0, site_packages)
 
 
-def _import_akeychain():
+def _detect_keychain_format(bundle_path: str | os.PathLike[str]) -> str | None:
+    bundle = Path(bundle_path)
+    if (bundle / 'data' / 'default' / 'encryptionKeys.js').is_file():
+        return 'agilekeychain'
+    if (bundle / 'default' / 'profile.js').is_file():
+        return 'opvault'
+
+    suffix = bundle.suffix.casefold()
+    if suffix == '.agilekeychain':
+        return 'agilekeychain'
+    if suffix in {'.opvault', '.cloudkeychain'}:
+        return 'opvault'
+    return None
+
+
+def _find_child_vaults(parent: Path) -> list[Path]:
+    if not parent.is_dir():
+        return []
+    candidates: list[Path] = []
+    for child in sorted(parent.iterdir()):
+        if not child.is_dir():
+            continue
+        if _detect_keychain_format(child) is not None:
+            candidates.append(child)
+    return candidates
+
+
+def normalize_vault_path(path: str | os.PathLike[str]) -> Path:
+    expanded = Path(path).expanduser()
+    normalized = Path(os.path.abspath(str(expanded)))
+
+    if not normalized.exists():
+        return normalized
+
+    if _detect_keychain_format(normalized) is not None:
+        return normalized
+
+    child_vaults = _find_child_vaults(normalized)
+    if len(child_vaults) == 1:
+        return child_vaults[0]
+    if len(child_vaults) > 1:
+        options = '\n'.join(f'- {candidate}' for candidate in child_vaults[:20])
+        raise AgileViewError(
+            'В выбранной папке найдено несколько vault. Выбери конкретный каталог vault:\n' + options
+        )
+
+    if normalized.is_dir():
+        raise AgileViewError(
+            'Выбранная папка не похожа на vault. Выбери каталог вида '
+            '*.agilekeychain, *.opvault или *.cloudkeychain'
+        )
+    return normalized
+
+
+def _keychain_candidates(bundle_path: str | os.PathLike[str], a_keychain: Any, c_keychain: Any) -> list[Any]:
+    detected_format = _detect_keychain_format(bundle_path)
+    if detected_format == 'opvault':
+        return [c_keychain, a_keychain]
+    return [a_keychain, c_keychain]
+
+
+def _import_keychain_classes():
     try:
-        from onepassword.keychain import AKeychain
-        return AKeychain
+        from onepassword.keychain import AKeychain, CKeychain
+        return AKeychain, CKeychain
     except Exception:
         _bootstrap_local_venv_site_packages()
         try:
-            from onepassword.keychain import AKeychain
-            return AKeychain
+            from onepassword.keychain import AKeychain, CKeychain
+            return AKeychain, CKeychain
         except Exception as exc:  # pragma: no cover - depends on user env
             raise BackendUnavailableError(
                 'Не удалось импортировать onepasswordpy. Установи зависимость: '
@@ -119,7 +207,7 @@ def _import_akeychain():
 
 class VaultReader:
     def __init__(self, path: str | os.PathLike[str]):
-        self.original_path = Path(path).expanduser().resolve()
+        self.original_path = normalize_vault_path(path)
         self.snapshot_path: Path | None = None
         self.backend: AgileKeychainBackend | None = None
 
@@ -361,6 +449,8 @@ def category_label_from_type(type_name: str) -> str:
     if normalized in CATEGORY_LABELS:
         return CATEGORY_LABELS[normalized]
     tail = normalized.split('.')[-1]
+    if tail in {'mc', 'visa'}:
+        return 'Кредитные карты'
     if tail == 'unknown':
         return 'Без категории'
     pretty = tail.replace('_', ' ').replace('-', ' ')
@@ -381,7 +471,54 @@ def has_legacy_login_field_pattern(data: dict[str, Any]) -> bool:
 
 
 
+def _path_tokens(path: str) -> list[str | int]:
+    tokens: list[str | int] = []
+    for key_token, index_token in re.findall(r'([^\.\[\]]+)|\[(\d+)\]', path):
+        if key_token:
+            tokens.append(key_token)
+        elif index_token:
+            tokens.append(int(index_token))
+    return tokens
+
+
+def _value_by_path(data: Any, path: str) -> Any:
+    current = data
+    for token in _path_tokens(path):
+        if isinstance(token, int):
+            if not isinstance(current, list) or token < 0 or token >= len(current):
+                return _MISSING
+            current = current[token]
+            continue
+        if not isinstance(current, dict) or token not in current:
+            return _MISSING
+        current = current[token]
+    return current
+
+
+def _matches_expected_value(actual: Any, expected: Any) -> bool:
+    if actual is _MISSING:
+        return False
+    if expected is NON_EMPTY_VALUE:
+        if isinstance(actual, str):
+            return bool(actual.strip())
+        return actual is not None
+    if isinstance(expected, str):
+        return str(actual).strip().casefold() == expected.strip().casefold()
+    return actual == expected
+
+
+def custom_category_for_payload(data: dict[str, Any]) -> tuple[str, str] | None:
+    for type_name, label, path, expected in CUSTOM_CATEGORY_RULES:
+        actual = _value_by_path(data, path)
+        if _matches_expected_value(actual, expected):
+            return type_name, label
+    return None
+
+
 def category_for_payload(data: dict[str, Any]) -> tuple[str, str]:
+    custom = custom_category_for_payload(data)
+    if custom is not None:
+        return custom
     if has_legacy_login_field_pattern(data):
         return 'legacy.login', 'Логины'
     type_name = infer_type_name(data)

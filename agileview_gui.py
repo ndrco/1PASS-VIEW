@@ -17,6 +17,7 @@ from adapter import (
     VaultReader,
     category_for_payload,
     flatten_common_fields,
+    normalize_vault_path,
     sanitize_payload,
 )
 
@@ -135,6 +136,7 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
         self.all_items = items
         self.master_password = master_password
         self.payload_cache: dict[str, dict[str, Any]] = {}
+        self.search_blob_by_uuid: dict[str, str] = {}
         self.display_items: list[DisplayItem] = []
         self.items_by_uuid: dict[str, DisplayItem] = {}
         self.filtered_items: list[DisplayItem] = []
@@ -147,7 +149,7 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
         self.minsize(1020, 640)
 
         self.search_var = tk.StringVar()
-        self.reveal_var = tk.BooleanVar(value=False)
+        self.reveal_var = tk.BooleanVar(value=get_show_secrets_enabled())
         self.status_var = tk.StringVar(value=f'Загружено записей: {len(items)}')
         self.path_var = tk.StringVar(value=str(reader.original_path))
 
@@ -168,19 +170,22 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
         path_entry = ttk.Entry(top, textvariable=self.path_var)
         path_entry.pack(side='left', fill='x', expand=True, padx=(6, 8))
         path_entry.state(['readonly'])
+        self.change_vault_btn = ttk.Button(top, text='Сменить vault...', command=self._change_vault)
+        self.change_vault_btn.pack(side='left')
 
         controls = ttk.Frame(root)
         controls.pack(fill='x', pady=(10, 6))
 
-        ttk.Label(controls, text='Фильтр:').pack(side='left')
+        ttk.Label(controls, text='Поиск:').pack(side='left')
         self.search_entry = ttk.Entry(controls, textvariable=self.search_var)
         self.search_entry.pack(side='left', fill='x', expand=True, padx=(6, 8))
+        ttk.Label(controls, text='(title/uuid/поля/значения)').pack(side='left', padx=(0, 8))
 
         self.reveal_check = ttk.Checkbutton(
             controls,
             text='Показать секретные поля',
             variable=self.reveal_var,
-            command=self._refresh_details,
+            command=self._on_reveal_toggle,
         )
         self.reveal_check.pack(side='left')
 
@@ -286,6 +291,7 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
         self.json_text.bind('<Button-1>', lambda _event: self._hide_context_menu())
 
         self.bind('<Control-f>', self._focus_search)
+        self.bind('<Control-o>', lambda _event: self._change_vault())
         self.bind('<F5>', lambda _event: self._reload_list())
         self.bind('<Escape>', lambda _event: self._hide_context_menu())
         self.bind('<Button-1>', lambda _event: self._hide_context_menu(), add='+')
@@ -293,17 +299,22 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
     def _build_display_index(self) -> None:
         self.display_items.clear()
         self.items_by_uuid.clear()
+        self.search_blob_by_uuid.clear()
         errors = 0
         for item in self.all_items:
             try:
                 payload = self._get_payload(item.uuid)
                 type_name, category_label = category_for_payload(payload)
+                payload_search_blob = build_search_blob(payload)
             except Exception:
                 errors += 1
                 type_name, category_label = 'unknown', 'Без категории'
+                payload_search_blob = ''
             display = DisplayItem(item=item, type_name=type_name, category_label=category_label)
             self.display_items.append(display)
             self.items_by_uuid[item.uuid] = display
+            metadata_blob = ' '.join((item.title, item.uuid, category_label, type_name))
+            self.search_blob_by_uuid[item.uuid] = f'{metadata_blob} {payload_search_blob}'.casefold()
 
         self.display_items.sort(key=lambda d: (d.category_label.casefold(), d.item.title.casefold(), d.item.uuid.casefold()))
         if errors:
@@ -373,10 +384,7 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
         filtered = [
             display
             for display in self.display_items
-            if query in display.item.title.casefold()
-            or query in display.item.uuid.casefold()
-            or query in display.category_label.casefold()
-            or query in display.type_name.casefold()
+            if query in self.search_blob_by_uuid.get(display.item.uuid, '')
         ]
         self._populate_tree(filtered)
 
@@ -404,6 +412,53 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
             return
 
         self.master_password = result.password
+        self.payload_cache.clear()
+        self.all_items = self.reader.list_items()
+        self._build_display_index()
+        self._on_search_change()
+
+    def _change_vault(self) -> None:
+        self._hide_context_menu()
+        initial_dir = str(self.reader.original_path.parent)
+        new_path = _ask_vault_path(parent=self, initial_dir=initial_dir)
+        if new_path is None:
+            self.status_var.set('Смена vault отменена')
+            return
+        try:
+            new_reader = VaultReader(new_path)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f'Не удалось открыть выбранный vault:\n{exc}')
+            self.status_var.set('Не удалось сменить vault')
+            return
+        if new_reader.original_path == self.reader.original_path:
+            self.status_var.set('Текущий vault уже выбран')
+            return
+        result = unlock_with_password_fallback(
+            new_reader,
+            self.master_password,
+            lambda: _ask_password(parent=self),
+        )
+        if not result.success:
+            if result.cancelled:
+                self.status_var.set('Смена vault отменена: мастер-пароль не введён')
+                return
+            if result.second_error is not None:
+                message = (
+                    'Не удалось открыть выбранный vault.\n\n'
+                    f'Первая попытка: {result.first_error}\n'
+                    f'Повторная попытка: {result.second_error}'
+                )
+            else:
+                message = f'Не удалось открыть выбранный vault:\n{result.first_error}'
+            messagebox.showerror(APP_NAME, message)
+            self.status_var.set('Не удалось сменить vault')
+            return
+
+        self.reader = new_reader
+        self.master_password = result.password
+        set_last_vault_path(new_path)
+        self.path_var.set(str(new_path))
+        self.search_var.set('')
         self.payload_cache.clear()
         self.all_items = self.reader.list_items()
         self._build_display_index()
@@ -513,6 +568,10 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
 
     def _refresh_details(self) -> None:
         self._display_current_selection()
+
+    def _on_reveal_toggle(self) -> None:
+        set_show_secrets_enabled(self.reveal_var.get())
+        self._refresh_details()
 
     def _show_field_context_menu(self, event) -> None:
         row_id = self.fields_tree.identify_row(event.y)
@@ -634,6 +693,29 @@ def normalize_display_value(value: Any) -> str:
     return str(value).strip()
 
 
+def build_search_blob(data: Any) -> str:
+    tokens: list[str] = []
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                key_text = str(key).strip()
+                if key_text:
+                    tokens.append(key_text)
+                walk(value)
+            return
+        if isinstance(obj, list):
+            for value in obj:
+                walk(value)
+            return
+        text = normalize_display_value(obj)
+        if text:
+            tokens.append(text)
+
+    walk(data)
+    return ' '.join(tokens).casefold()
+
+
 
 def friendly_label(path: str) -> str:
     path = path.replace('notesplain', 'notes')
@@ -746,9 +828,25 @@ def get_last_vault_path() -> str | None:
 
 
 
+def get_show_secrets_enabled() -> bool:
+    config = load_config()
+    value = config.get('show_secrets')
+    if isinstance(value, bool):
+        return value
+    return False
+
+
+
 def set_last_vault_path(path: Path) -> None:
     config = load_config()
     config['last_vault_path'] = str(path.expanduser().resolve())
+    save_config(config)
+
+
+
+def set_show_secrets_enabled(value: bool) -> None:
+    config = load_config()
+    config['show_secrets'] = bool(value)
     save_config(config)
 
 
@@ -775,16 +873,33 @@ def _make_hidden_root() -> tk.Tk:
 def _choose_vault_path(initial_path: str | None) -> Path | None:
     candidate = initial_path or get_last_vault_path()
     if candidate:
-        path = Path(candidate).expanduser().resolve()
-        if path.exists():
-            return path
+        try:
+            path = normalize_vault_path(candidate)
+            if path.exists():
+                return path
+        except AgileViewError:
+            pass
 
     root = _make_hidden_root()
-    chosen = filedialog.askdirectory(title=f'{APP_NAME} — выбери папку 1Password.agilekeychain', parent=root)
-    root.destroy()
-    if not chosen:
-        return None
-    return Path(chosen).expanduser().resolve()
+    try:
+        return _ask_vault_path(parent=root, initial_dir=None)
+    finally:
+        root.destroy()
+
+
+def _ask_vault_path(parent: tk.Misc, initial_dir: str | None) -> Path | None:
+    while True:
+        chosen = filedialog.askdirectory(
+            title=f'{APP_NAME} — выбери папку vault (.agilekeychain / .opvault / .cloudkeychain)',
+            parent=parent,
+            initialdir=initial_dir or str(Path.home()),
+        )
+        if not chosen:
+            return None
+        try:
+            return normalize_vault_path(chosen)
+        except AgileViewError as exc:
+            messagebox.showerror(APP_NAME, str(exc), parent=parent)
 
 
 
@@ -838,8 +953,8 @@ def _ask_password(parent: tk.Misc | None = None) -> str | None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='GUI viewer for 1Password.agilekeychain')
-    parser.add_argument('--path', help='Путь к 1Password.agilekeychain')
+    parser = argparse.ArgumentParser(description='GUI viewer for legacy 1Password vaults')
+    parser.add_argument('--path', help='Путь к 1Password vault (.agilekeychain/.opvault/.cloudkeychain)')
     return parser.parse_args()
 
 
