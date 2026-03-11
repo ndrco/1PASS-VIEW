@@ -9,8 +9,6 @@ from typing import Any, Callable
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from tkinter.scrolledtext import ScrolledText
-
 from adapter import (
     AgileViewError,
     VaultItem,
@@ -242,25 +240,52 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
         self.notebook.add(fields_tab, text='Поля')
         self.notebook.add(json_tab, text='JSON')
 
-        self.fields_tree = ttk.Treeview(fields_tab, columns=('field', 'value'), show='headings', selectmode='browse')
+        fields_pane = ttk.Panedwindow(fields_tab, orient='vertical')
+        fields_pane.pack(fill='both', expand=True)
+
+        fields_table_wrap = ttk.Frame(fields_pane)
+        fields_notes_wrap = ttk.LabelFrame(fields_pane, text='notesPlain')
+        fields_pane.add(fields_table_wrap, weight=5)
+        fields_pane.add(fields_notes_wrap, weight=1)
+
+        self.fields_tree = ttk.Treeview(fields_table_wrap, columns=('field', 'value'), show='headings', selectmode='browse')
         self.fields_tree.heading('field', text='Поле')
         self.fields_tree.heading('value', text='Значение')
         self.fields_tree.column('field', width=300, anchor='w')
         self.fields_tree.column('value', width=760, anchor='w')
 
-        fields_scroll_y = ttk.Scrollbar(fields_tab, orient='vertical', command=self.fields_tree.yview)
-        fields_scroll_x = ttk.Scrollbar(fields_tab, orient='horizontal', command=self.fields_tree.xview)
+        fields_scroll_y = ttk.Scrollbar(fields_table_wrap, orient='vertical', command=self.fields_tree.yview)
+        fields_scroll_x = ttk.Scrollbar(fields_table_wrap, orient='horizontal', command=self.fields_tree.xview)
         self.fields_tree.configure(yscrollcommand=fields_scroll_y.set, xscrollcommand=fields_scroll_x.set)
 
         self.fields_tree.grid(row=0, column=0, sticky='nsew')
         fields_scroll_y.grid(row=0, column=1, sticky='ns')
         fields_scroll_x.grid(row=1, column=0, sticky='ew')
-        fields_tab.rowconfigure(0, weight=1)
-        fields_tab.columnconfigure(0, weight=1)
+        fields_table_wrap.rowconfigure(0, weight=1)
+        fields_table_wrap.columnconfigure(0, weight=1)
 
-        self.json_text = ScrolledText(json_tab, wrap='none', font=('TkFixedFont', 10))
-        self.json_text.pack(fill='both', expand=True)
+        self.notes_text = tk.Text(fields_notes_wrap, wrap='none', font=('TkFixedFont', 10), height=5)
+        notes_scroll_y = ttk.Scrollbar(fields_notes_wrap, orient='vertical', command=self.notes_text.yview)
+        notes_scroll_x = ttk.Scrollbar(fields_notes_wrap, orient='horizontal', command=self.notes_text.xview)
+        self.notes_text.configure(yscrollcommand=notes_scroll_y.set, xscrollcommand=notes_scroll_x.set)
+        self.notes_text.grid(row=0, column=0, sticky='nsew')
+        notes_scroll_y.grid(row=0, column=1, sticky='ns')
+        notes_scroll_x.grid(row=1, column=0, sticky='ew')
+        fields_notes_wrap.rowconfigure(0, weight=1)
+        fields_notes_wrap.columnconfigure(0, weight=1)
+
+        self.json_text = tk.Text(json_tab, wrap='none', font=('TkFixedFont', 10))
+        json_scroll_y = ttk.Scrollbar(json_tab, orient='vertical', command=self.json_text.yview)
+        json_scroll_x = ttk.Scrollbar(json_tab, orient='horizontal', command=self.json_text.xview)
+        self.json_text.configure(yscrollcommand=json_scroll_y.set, xscrollcommand=json_scroll_x.set)
+        self.json_text.grid(row=0, column=0, sticky='nsew')
+        json_scroll_y.grid(row=0, column=1, sticky='ns')
+        json_scroll_x.grid(row=1, column=0, sticky='ew')
+        json_tab.rowconfigure(0, weight=1)
+        json_tab.columnconfigure(0, weight=1)
         self.json_text.configure(state='disabled')
+        self._configure_readonly_text(self.notes_text)
+        self._set_text(self.notes_text, '')
 
         status = ttk.Label(root, textvariable=self.status_var, anchor='w')
         status.pack(fill='x', pady=(8, 0))
@@ -274,6 +299,9 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
         self.json_menu.add_command(label='Копировать выделенное', command=self._copy_selected_json_text)
         self.json_menu.add_command(label='Копировать весь JSON', command=self._copy_json)
 
+        self.notes_menu = tk.Menu(self, tearoff=0)
+        self.notes_menu.add_command(label='Копировать выделенное', command=self._copy_selected_notes_text)
+
     def _bind_events(self) -> None:
         self.search_var.trace_add('write', self._on_search_change)
         self.tree.bind('<<TreeviewSelect>>', lambda _event: self._display_current_selection())
@@ -285,6 +313,10 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
         self.fields_tree.bind('<Control-c>', lambda _event: self._copy_selected_field_value())
         self.fields_tree.bind('<Motion>', self._hide_field_menu_on_empty_space)
         self.fields_tree.bind('<Button-1>', lambda _event: self._hide_context_menu())
+
+        self.notes_text.bind('<Button-3>', self._show_notes_context_menu)
+        self.notes_text.bind('<Control-c>', self._copy_selected_notes_text)
+        self.notes_text.bind('<Button-1>', lambda _event: self._hide_context_menu())
 
         self.json_text.bind('<Button-3>', self._show_json_context_menu)
         self.json_text.bind('<Control-c>', self._copy_selected_json_text)
@@ -371,6 +403,7 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
             self._focus_tree_first_item()
         else:
             self._clear_fields_view('Ничего не найдено.')
+            self._set_text(self.notes_text, '')
             self._set_text(self.json_text, '')
             self.quick_fields = {}
             self._update_quick_copy_buttons()
@@ -491,6 +524,7 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
     def _display_current_selection(self) -> None:
         uuid = self._selected_uuid()
         if not uuid:
+            self._set_text(self.notes_text, '')
             self.quick_fields = {}
             self._update_quick_copy_buttons()
             return
@@ -506,6 +540,7 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
             rendered_compact = compact_payload if reveal else sanitize_payload(compact_payload)
             category_label = display.category_label if display else 'Без категории'
             type_name = display.type_name if display else 'unknown'
+            rendered_notes_plain = extract_notes_plain(payload)
 
             display_table_payload: dict[str, Any] = {
                 'title': title,
@@ -526,6 +561,7 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
             display_rows = flatten_for_table(display_table_payload)
             copy_rows = flatten_for_table(copy_table_payload)
             self._populate_fields_table(combine_field_rows(display_rows, copy_rows))
+            self._set_text(self.notes_text, rendered_notes_plain)
             self._set_text(self.json_text, json.dumps(rendered_payload, ensure_ascii=False, indent=2))
 
             self.quick_fields = pick_quick_fields(copy_rows)
@@ -533,6 +569,7 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
             self.status_var.set(f'Открыта запись: {title}')
         except Exception as exc:
             self._clear_fields_view(f'Ошибка чтения записи: {exc}')
+            self._set_text(self.notes_text, '')
             self._set_text(self.json_text, traceback.format_exc())
             self.quick_fields = {}
             self._update_quick_copy_buttons()
@@ -587,6 +624,12 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
         self._hide_context_menu()
         self.active_menu = self.json_menu
         self.json_menu.post(event.x_root, event.y_root)
+
+    def _show_notes_context_menu(self, event) -> None:
+        self.notes_text.focus_set()
+        self._hide_context_menu()
+        self.active_menu = self.notes_menu
+        self.notes_menu.post(event.x_root, event.y_root)
 
     def _hide_field_menu_on_empty_space(self, event) -> None:
         if self.active_menu is not self.field_menu:
@@ -644,6 +687,15 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
             return self._copy_json() or 'break'
         return self._copy_to_clipboard(selected, 'Выделенный JSON скопирован')
 
+    def _copy_selected_notes_text(self, _event=None) -> str:
+        try:
+            selected = self.notes_text.get('sel.first', 'sel.last')
+        except tk.TclError:
+            selected = self.notes_text.get('1.0', 'end-1c')
+        if not selected:
+            return 'break'
+        return self._copy_to_clipboard(selected, 'Фрагмент notesPlain скопирован')
+
     def _copy_json(self) -> str | None:
         uuid = self._selected_uuid()
         if not uuid:
@@ -674,8 +726,21 @@ class AgileViewGUI(WindowIdentityMixin, tk.Tk):
                 self._copy_to_clipboard(value, f'{label} — готово')
                 return
 
+    def _configure_readonly_text(self, widget: tk.Text) -> None:
+        for sequence in (
+            '<Key>',
+            '<<Cut>>',
+            '<<Paste>>',
+            '<<Clear>>',
+            '<BackSpace>',
+            '<Delete>',
+            '<Control-v>',
+            '<Control-x>',
+        ):
+            widget.bind(sequence, lambda _event: 'break')
+
     @staticmethod
-    def _set_text(widget: ScrolledText, text: str) -> None:
+    def _set_text(widget: tk.Text, text: str) -> None:
         widget.configure(state='normal')
         widget.delete('1.0', 'end')
         widget.insert('1.0', text)
@@ -723,6 +788,15 @@ def friendly_label(path: str) -> str:
     return path
 
 
+def extract_notes_plain(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ''
+    value = data.get('notesPlain')
+    if value is None:
+        return ''
+    return normalize_display_value(value)
+
+
 
 def flatten_for_table(data: Any) -> list[FlatTableRow]:
     rows: list[FlatTableRow] = []
@@ -732,7 +806,8 @@ def flatten_for_table(data: Any) -> list[FlatTableRow]:
         text = normalize_display_value(value)
         if not label or not text:
             return
-        if path.casefold() in SKIP_PATHS:
+        path_key = path.casefold()
+        if path_key in SKIP_PATHS or path_key == 'notesplain':
             return
         rows.append(FlatTableRow(path=path, field=label, value=text))
 

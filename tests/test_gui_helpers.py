@@ -12,6 +12,7 @@ from agileview_gui import (
     _choose_vault_path,
     build_search_blob,
     combine_field_rows,
+    extract_notes_plain,
     flatten_for_table,
     get_show_secrets_enabled,
     pick_quick_fields,
@@ -53,6 +54,16 @@ class CopyFlowTests(unittest.TestCase):
 
         quick_fields = pick_quick_fields(copy_rows)
         self.assertEqual(quick_fields.get('password'), 'abc123')
+
+    def test_notes_plain_is_extracted_for_separate_text_view(self) -> None:
+        payload = {'notesPlain': 'login: alice\npassword: secret'}
+
+        self.assertEqual(extract_notes_plain(payload), 'login: alice\npassword: secret')
+
+    def test_flatten_for_table_skips_notes_plain_row(self) -> None:
+        rows = flatten_for_table({'title': 'Entry', 'notesPlain': 'secret note', 'url': 'https://example.com'})
+
+        self.assertEqual([row.path for row in rows], ['url'])
 
     def test_build_search_blob_includes_field_names_and_values(self) -> None:
         payload = {
